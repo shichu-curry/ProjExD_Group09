@@ -122,6 +122,38 @@ def jp_available():
     return bool(JP_FONT_PATH)
 
 
+def make_diamond_surf(size, color, border=None):
+    """♦（ひし形）のSurfaceを作る。経験値ジェムの描画に使用。"""
+    w = h = size * 2
+    surf = pygame.Surface((w, h), pygame.SRCALPHA)
+    points = [(size, 0), (w, size), (size, h), (0, size)]
+    pygame.draw.polygon(surf, color, points)
+    if border:
+        pygame.draw.polygon(surf, border, points, 2)
+    return surf
+
+
+def make_heart_surf(size, color, border=None):
+    """ハート形のSurfaceを作る。回復アイテムの描画に使用。"""
+    w = h = size * 2
+    surf = pygame.Surface((w, h), pygame.SRCALPHA)
+    cx = w / 2
+    lobe_r = size * 0.55
+    points = []
+    for i in range(9):
+        a = math.pi * (1.0 - i / 8)
+        points.append((cx - lobe_r + lobe_r * math.cos(a),
+                       lobe_r + lobe_r * math.sin(a) - lobe_r * 0.15))
+    for i in range(9):
+        a = math.pi * (1.0 - i / 8)
+        points.append((cx + lobe_r - lobe_r * math.cos(a),
+                       lobe_r + lobe_r * math.sin(a) - lobe_r * 0.15))
+    points.append((cx, h))
+    pygame.draw.polygon(surf, color, points)
+    if border:
+        pygame.draw.polygon(surf, border, points, 2)
+    return surf
+
 def make_circle_surf(radius, color, border=None):
     """円形のSurfaceを作る（画像素材が無くても動くように）。
     [拡張] こうかとん画像を使う場合はここを pygame.image.load に差し替える"""
@@ -150,6 +182,7 @@ class Player(pygame.sprite.Sprite):
         self.max_hp = PLAYER_MAX_HP
         self.hp = self.max_hp
         self.invincible_until = 0  # この時刻まで無敵
+        self.exp = 0  # 経験値ジェム取得の受け皿
 
     def update(self, keys, now):
         #8方向移動
@@ -172,6 +205,10 @@ class Player(pygame.sprite.Sprite):
         self.hp -= amount
         self.invincible_until = now + INVINCIBLE_MS
         # [拡張] ノックバック・被弾SEはここに追加
+
+    def heal(self, amount):
+        """回復アイテム取得時などに呼ぶ。max_hpを超えない。"""
+        self.hp = min(self.max_hp, self.hp + amount)
 
     def is_invincible(self, now):
         return now < self.invincible_until
@@ -303,6 +340,47 @@ class Weapon:
                 best, nearest = d, e
         return nearest
 
+# =========================================================
+# 5. アイテム（経験値ジェム・回復アイテム）
+# =========================================================
+
+EXP_GEM_COLOR    = (80, 220, 255)
+EXP_GEM_BORDER   = (20, 120, 170)
+HEAL_ITEM_COLOR  = (240, 70, 100)
+HEAL_ITEM_BORDER = (150, 20, 40)
+HEAL_AMOUNT = 20
+HEAL_DROP_RATE = 0.15
+
+
+class ExpGem(pygame.sprite.Sprite):
+    def __init__(self, pos, value=1):
+        super().__init__()
+        self.image = make_diamond_surf(9, EXP_GEM_COLOR, EXP_GEM_BORDER)
+        self.rect = self.image.get_rect(center=pos)
+        self.value = value
+
+
+class HealItem(pygame.sprite.Sprite):
+    def __init__(self, pos):
+        super().__init__()
+        self.image = make_heart_surf(11, HEAL_ITEM_COLOR, HEAL_ITEM_BORDER)
+        self.rect = self.image.get_rect(center=pos)
+        self.heal_amount = HEAL_AMOUNT
+
+
+def spawn_item_drop(pos, items):
+    items.add(ExpGem(pos, value=random.randint(1, 3)))
+    if random.random() < HEAL_DROP_RATE:
+        items.add(HealItem(pos))
+
+
+def collect_items(player, items):
+    picked = pygame.sprite.spritecollide(player, items, True)
+    for item in picked:
+        if isinstance(item, ExpGem):
+            player.exp += item.value
+        elif isinstance(item, HealItem):
+            player.heal(item.heal_amount)
 
 # =========================================================
 # 6. UI
@@ -330,6 +408,9 @@ def draw_hud(screen, font, player, elapsed_ms, kills):
     # 撃破数
     kill_text = font.render(f"KILL {kills}", True, COL_TEXT)
     screen.blit(kill_text, kill_text.get_rect(topright=(WIDTH - 20, 18)))
+
+    exp_text = font.render(f"EXP {player.exp}", True, COL_TEXT)
+    screen.blit(exp_text, exp_text.get_rect(topright=(WIDTH - 20, 44)))
 
 
 # =========================================================
@@ -368,8 +449,7 @@ def reset_game():
         "player": Player((WIDTH // 2, HEIGHT // 2)),
         "enemies": pygame.sprite.Group(),
         "bullets": pygame.sprite.Group(),
-        # [拡張] items: pygame.sprite.Group() をここに足せば
-        #        アイテムドロップ機能のグループ管理ができる
+        "items": pygame.sprite.Group(),
         "weapons": [Weapon()],   # [拡張] 武器追加時はこのリストに append
         "start_ms": pygame.time.get_ticks(),
         "last_spawn": 0,
@@ -433,8 +513,8 @@ def main():
             for bullet, hit_enemies in hits.items():
                 for enemy in hit_enemies:
                     if enemy.take_damage(bullet.damage):
-                        game["kills"] += 1
-                        # [拡張] 撃破時: アイテムドロップ・スコア加算・撃破SE
+                       game["kills"] += 1
+                       spawn_item_drop(enemy.rect.center, game["items"])
 
             # 敵 × プレイヤー
             touched = pygame.sprite.spritecollide(player, enemies, False)
@@ -443,20 +523,25 @@ def main():
                 if player.hp <= 0:
                     final_time = elapsed
                     state = "GAMEOVER"
+            # プレイヤー × アイテム（触れると消えて回復/EXP加算）
+            collect_items(player, game["items"])
 
         # --- 描画処理 ---
         screen.fill(COL_BG)
         if state == "PLAY":
             game["bullets"].draw(screen)
             game["enemies"].draw(screen)
+            game["items"].draw(screen)
             game["player"].draw(screen, now)
             draw_hud(screen, font, game["player"],
                      now - game["start_ms"], game["kills"])
         else:  # GAMEOVER
             game["bullets"].draw(screen)
             game["enemies"].draw(screen)
+            game["items"].draw(screen)
             draw_hud(screen, font, game["player"], final_time, game["kills"])
             draw_gameover(screen, font_big, font, final_time, game["kills"])
+           
 
         pygame.display.flip()
         clock.tick(FPS)
