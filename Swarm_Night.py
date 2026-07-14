@@ -51,7 +51,7 @@ COL_BG     = (24, 28, 24)
 COL_TEXT   = (240, 240, 240)
 COL_HP_BG  = (70, 30, 30)
 COL_HP_FG  = (60, 200, 90)
-
+COL_STAMINA_FG = (240, 140, 20)  # [追加] スタミナバーのオレンジ色
 
 # =========================================================
 # ユーティリティ
@@ -116,6 +116,39 @@ def jp_available():
     """日本語フォントが使えるか。"""
     return bool(JP_FONT_PATH)
 
+
+def make_diamond_surf(size, color, border=None):
+    """♦（ひし形）のSurfaceを作る。経験値ジェムの描画に使用。"""
+    w = h = size * 2
+    surf = pygame.Surface((w, h), pygame.SRCALPHA)
+    points = [(size, 0), (w, size), (size, h), (0, size)]
+    pygame.draw.polygon(surf, color, points)
+    if border:
+        pygame.draw.polygon(surf, border, points, 2)
+    return surf
+
+
+def make_heart_surf(size, color, border=None):
+    """ハート形のSurfaceを作る。回復アイテムの描画に使用。"""
+    w = h = size * 2
+    surf = pygame.Surface((w, h), pygame.SRCALPHA)
+    cx = w / 2
+    lobe_r = size * 0.55
+    points = []
+    for i in range(9):
+        heart = math.pi * (1.0 - i / 8)
+        points.append((cx - lobe_r + lobe_r * math.cos(heart),
+                       lobe_r + lobe_r * math.sin(heart) - lobe_r * 0.15))
+    for i in range(9):
+        heart = math.pi * (1.0 - i / 8)
+        points.append((cx + lobe_r - lobe_r * math.cos(heart),
+                       lobe_r + lobe_r * math.sin(heart) - lobe_r * 0.15))
+    points.append((cx, h))
+    pygame.draw.polygon(surf, color, points)
+    if border:
+        pygame.draw.polygon(surf, border, points, 2)
+    return surf
+
 def make_circle_surf(radius, color, border=None):
     """円形のSurfaceを作る（画像素材が無くても動くように）。
     [拡張] こうかとん画像を使う場合はここを pygame.image.load に差し替える"""
@@ -165,6 +198,10 @@ class Player(pygame.sprite.Sprite):
         self.hp = self.max_hp
         self.invincible_until = 0  # この時刻まで無敵
         self.facing = (1.0, 0.0)   # 最後に移動した方向（槍・斧が参照）追加機能実装(杉本)
+        self.exp = 0  # 経験値ジェム取得の受け皿
+        self.max_stamina: float = 100.0 #最大スタミナ値
+        self.stamina: float = 100.0     #現在のスタミナ値
+
 
     def update(self, keys, now):
         #8方向移動
@@ -176,19 +213,47 @@ class Player(pygame.sprite.Sprite):
             dx *= 0.7071
             dy *= 0.7071
         if dx or dy:
-            self.facing = (dx, dy)  # 移動中だけ向きを更新 追加機能実装(杉本)
+            self.facing = (dx, dy)  # 移動中だけ向きを更新　追加機能実装(杉本)
+            
+     # [拡張] ダッシュ機能: Shift押下中は speed を一時的に倍にする等    
+        is_moving = (dx != 0 or dy != 0)
+        is_dash_pressed = keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]
+        
+        # 基準となる通常速度（4.5）を設定
+        base_speed = 4.5
+
+        if is_dash_pressed and is_moving and self.stamina > 0:
+            self.speed = base_speed * 1.6
+            self.stamina = max(0.0, self.stamina - 0.8)  # スタミナ消費
+        else:
+            self.speed = base_speed
+            self.stamina = min(self.max_stamina, self.stamina + 0.05)  # スタミナ回復
+            
         self.rect.x += dx * self.speed
         self.rect.y += dy * self.speed
         self.rect.clamp_ip(pygame.Rect(0, 0, WIDTH, HEIGHT))
-        # [拡張] ダッシュ機能: Shift押下中は speed を一時的に倍にする等
 
-    def take_damage(self, amount, now):
+    def take_damage(self, amount, now,enemy_pos):
         """被弾処理。無敵時間中はダメージを受けない。"""
         if now < self.invincible_until:
             return
         self.hp -= amount
         self.invincible_until = now + INVINCIBLE_MS
-        # [拡張] ノックバック・被弾SEはここに追加
+        # 大島担当
+        vx = self.rect.centerx - enemy_pos[0]# 敵からプレイヤーへ向かう方向ベクトルを計算
+        vy = self.rect.centery - enemy_pos[1]
+
+        dist = math.hypot(vx, vy)# ベクトルを正規化
+
+        if dist != 0:
+            self.rect.x += int(vx / dist * 30)# プレイヤーを敵から離す方向に30px移動させる
+            self.rect.y += int(vy / dist * 30)
+
+        self.rect.clamp_ip(pygame.Rect(0, 0, WIDTH, HEIGHT))
+
+    def heal(self, amount):
+        """回復アイテム取得時などに呼ぶ。max_hpを超えない。"""
+        self.hp = min(self.max_hp, self.hp + amount)
 
     def is_invincible(self, now):
         return now < self.invincible_until
@@ -239,21 +304,37 @@ class Enemy(pygame.sprite.Sprite):
 
 def spawn_enemy(enemies, now_ms):
     """画面外のランダムな位置に敵を1体湧かせる。
-    [拡張] 難易度上昇: now_ms（経過時間）に応じて湧き数・敵HP・速度を
-           増やす処理をこの関数に足す。
+    難易度上昇: now_ms（経過時間）に応じて湧き数・敵HP・速度を増やす。
     [拡張] ウェーブ制: 「何秒にどの敵を何体」というテーブルを参照する形に
            書き換えるとウェーブ管理機能になる"""
-    side = random.randint(0, 3)
-    margin = 30
-    if side == 0:    # 上
-        pos = (random.randint(0, WIDTH), -margin)
-    elif side == 1:  # 下
-        pos = (random.randint(0, WIDTH), HEIGHT + margin)
-    elif side == 2:  # 左
-        pos = (-margin, random.randint(0, HEIGHT))
-    else:            # 右
-        pos = (WIDTH + margin, random.randint(0, HEIGHT))
-    enemies.add(Enemy(pos))
+    # 30秒(30000ミリ秒)ごとに難易度レベルが1上がる設計
+    difficulty_level = now_ms // 30000
+    
+    # 湧き数: 基本1体 + 60秒ごとに1体追加（難易度レベル2ごとに+1）
+    spawn_count = 1 + (difficulty_level // 2)
+
+    for _ in range(spawn_count):
+        side = random.randint(0, 3)
+        margin = 30
+        if side == 0:    # 上
+            pos = (random.randint(0, WIDTH), -margin)
+        elif side == 1:  # 下
+            pos = (random.randint(0, WIDTH), HEIGHT + margin)
+        elif side == 2:  # 左
+            pos = (-margin, random.randint(0, HEIGHT))
+        else:            # 右
+            pos = (WIDTH + margin, random.randint(0, HEIGHT))
+        
+        enemy = Enemy(pos)
+
+        # 経過時間によるステータス強化
+        # 速度: レベルごとに +0.15 加算
+        enemy.speed = ENEMY_SPEED + (difficulty_level * 0.15)
+        # HP: レベルごとに +1 加算（整数に固定）
+        enemy.hp = ENEMY_HP + difficulty_level
+        # ダメージ: レベルごとに +1 加算（整数に固定）
+        enemy.damage = int(ENEMY_DAMAGE + difficulty_level)
+        enemies.add(enemy)
 
 
 # =========================================================
@@ -338,6 +419,47 @@ class Weapon:
                 best, nearest = d, e
         return nearest
 
+# =========================================================
+# 5. アイテム（経験値ジェム・回復アイテム）
+# =========================================================
+
+EXP_GEM_COLOR    = (80, 220, 255)
+EXP_GEM_BORDER   = (20, 120, 170)
+HEAL_ITEM_COLOR  = (240, 70, 100)
+HEAL_ITEM_BORDER = (150, 20, 40)
+HEAL_AMOUNT = 20
+HEAL_DROP_RATE = 0.15
+
+
+class ExpGem(pygame.sprite.Sprite):
+    def __init__(self, pos, value=1):
+        super().__init__()
+        self.image = make_diamond_surf(9, EXP_GEM_COLOR, EXP_GEM_BORDER)
+        self.rect = self.image.get_rect(center=pos)
+        self.value = value
+
+
+class HealItem(pygame.sprite.Sprite):
+    def __init__(self, pos):
+        super().__init__()
+        self.image = make_heart_surf(11, HEAL_ITEM_COLOR, HEAL_ITEM_BORDER)
+        self.rect = self.image.get_rect(center=pos)
+        self.heal_amount = HEAL_AMOUNT
+
+
+def spawn_item_drop(pos, items):
+    items.add(ExpGem(pos, value=random.randint(1, 3)))
+    if random.random() < HEAL_DROP_RATE:
+        items.add(HealItem(pos))
+
+
+def collect_items(player, items):
+    picked = pygame.sprite.spritecollide(player, items, True)
+    for item in picked:
+        if isinstance(item, ExpGem):
+            player.exp += item.value
+        elif isinstance(item, HealItem):
+            player.heal(item.heal_amount)
 
 # ---------------------------------------------------------
 # 追加武器: 剣（回転斬撃）・槍（突き）・斧（投擲）
@@ -503,7 +625,20 @@ def draw_hud(screen, font, player, elapsed_ms, kills):
     hp_text = font.render(f"HP {max(0, player.hp)}/{player.max_hp}",
                           True, COL_TEXT)
     screen.blit(hp_text, (270, 18))
-
+    
+    #スタミナバー
+    stamina_bar_w, stamina_bar_h = 240, 6
+    pygame.draw.rect(screen, (50, 40, 30), (20, 43, stamina_bar_w, stamina_bar_h), border_radius=2)
+    stamina_ratio = max(0.0, player.stamina / player.max_stamina)
+    pygame.draw.rect(screen, COL_STAMINA_FG, (20, 43, int(stamina_bar_w * stamina_ratio), stamina_bar_h), border_radius=2)
+    
+    if jp_available():
+        stamina_label = "スタミナ"
+    else:
+        stamina_label = "STAMINA"
+    stamina_text = font.render(f"{stamina_label} {int(player.stamina)}%", True, (200, 180, 150))
+    screen.blit(stamina_text, (270, 38))
+    
     # 経過時間 (MM:SS)
     sec = elapsed_ms // 1000
     time_text = font.render(f"TIME {sec // 60:02d}:{sec % 60:02d}",
@@ -513,6 +648,9 @@ def draw_hud(screen, font, player, elapsed_ms, kills):
     # 撃破数
     kill_text = font.render(f"KILL {kills}", True, COL_TEXT)
     screen.blit(kill_text, kill_text.get_rect(topright=(WIDTH - 20, 18)))
+
+    exp_text = font.render(f"EXP {player.exp}", True, COL_TEXT)
+    screen.blit(exp_text, exp_text.get_rect(topright=(WIDTH - 20, 44)))
 
 
 # =========================================================
@@ -560,14 +698,13 @@ def reset_game():
     return {
         "player": Player((WIDTH // 2, HEIGHT // 2)),
         "enemies": pygame.sprite.Group(),
-        "bullets": pygame.sprite.Group(),
-        "attacks": pygame.sprite.Group(), 
-        "weapons": [
-            Weapon(img_flash, snd_gun), 
-            SwordWeapon(img_sword), 
-            SpearWeapon(img_spear), 
-            AxeWeapon(img_axe)
-        ],
+        "bullets": pygame.sprite.Group(),# 修正: 剣・槍・斧などの近接攻撃スプライトを管理するグループを追加 追加実装(杉本)
+        "attacks": pygame.sprite.Group(), # 修正: 3武器(剣・槍・斧)をweaponsリストに登録　追加実装(杉本)
+        "weapons": [Weapon(flash_image=img_flash,fire_sound=snd_gun),
+                    SwordWeapon(img_sword),
+                    SpearWeapon(img_spear),
+                    AxeWeapon(img_axe)],
+        "items": pygame.sprite.Group(),
         "start_ms": pygame.time.get_ticks(),
         "last_spawn": 0,
         "kills": 0,
@@ -615,8 +752,12 @@ def main():
             keys = pygame.key.get_pressed()
             player.update(keys, now)
 
+            # 難易度による湧き間隔の短縮 (30秒ごとに100ms短縮、最小200msまで)
+            difficulty_level = elapsed // 30000
+            current_spawn_interval = max(200, SPAWN_INTERVAL - (difficulty_level * 100))
+
             # 敵スポーン
-            if now - game["last_spawn"] >= SPAWN_INTERVAL:
+            if now - game["last_spawn"] >= current_spawn_interval:
                 spawn_enemy(enemies, elapsed)
                 game["last_spawn"] = now
 
@@ -645,20 +786,29 @@ def main():
                     attack.hit_ids.add(id(enemy))
                     if enemy.take_damage(attack.damage):
                         game["kills"] += 1
-                        
+                        spawn_item_drop(enemy.rect.center, game["items"])
+
             # 敵 × プレイヤー
             touched = pygame.sprite.spritecollide(player, enemies, False)
-            if touched:
-                player.take_damage(touched[0].damage, now)
+            if touched:#敵に触れた時の判定
+                enemy = touched[0]
+                player.take_damage(
+                enemy.damage,
+                now,#無敵時間
+                enemy.rect.center#敵座標
+                )
                 if player.hp <= 0:
                     final_time = elapsed
                     state = "GAMEOVER"
+            # プレイヤー × アイテム（触れると消えて回復/EXP加算）
+            collect_items(player, game["items"])
 
         # --- 描画処理 ---
         screen.fill(COL_BG)
         if state == "PLAY":
             game["bullets"].draw(screen)
             game["enemies"].draw(screen)
+            game["items"].draw(screen)
             game["player"].draw(screen, now)
             game["attacks"].draw(screen)  # プレイヤーの「上」に描画されるよう順番を後へ移動
             draw_hud(screen, font, game["player"],
@@ -667,9 +817,10 @@ def main():
             game["bullets"].draw(screen)
             game["enemies"].draw(screen)
             game["attacks"].draw(screen)
+            game["items"].draw(screen)
             draw_hud(screen, font, game["player"], final_time, game["kills"])
             draw_gameover(screen, font_big, font, final_time, game["kills"])
-
+           
         pygame.display.flip()
         clock.tick(FPS)
 
