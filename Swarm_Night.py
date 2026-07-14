@@ -239,13 +239,23 @@ class Player(pygame.sprite.Sprite):
         self.rect.y += dy * self.speed
         self.rect.clamp_ip(pygame.Rect(0, 0, WIDTH, HEIGHT))
 
-    def take_damage(self, amount, now):
+    def take_damage(self, amount, now,enemy_pos):
         """被弾処理。無敵時間中はダメージを受けない。"""
         if now < self.invincible_until:
             return
         self.hp -= amount
         self.invincible_until = now + INVINCIBLE_MS
-        # [拡張] ノックバック・被弾SEはここに追加
+        # 大島担当
+        vx = self.rect.centerx - enemy_pos[0]# 敵からプレイヤーへ向かう方向ベクトルを計算
+        vy = self.rect.centery - enemy_pos[1]
+
+        dist = math.hypot(vx, vy)# ベクトルを正規化
+
+        if dist != 0:
+            self.rect.x += int(vx / dist * 30)# プレイヤーを敵から離す方向に30px移動させる
+            self.rect.y += int(vy / dist * 30)
+
+        self.rect.clamp_ip(pygame.Rect(0, 0, WIDTH, HEIGHT))
 
     def heal(self, amount):
         """回復アイテム取得時などに呼ぶ。max_hpを超えない。"""
@@ -735,8 +745,13 @@ def main():
 
             # 敵 × プレイヤー
             touched = pygame.sprite.spritecollide(player, enemies, False)
-            if touched:
-                player.take_damage(touched[0].damage, now)
+            if touched:#敵に触れた時の判定
+                enemy = touched[0]
+                player.take_damage(
+                enemy.damage,
+                now,#無敵時間
+                enemy.rect.center#敵座標
+                )
                 if player.hp <= 0:
                     final_time = elapsed
                     state = "GAMEOVER"
