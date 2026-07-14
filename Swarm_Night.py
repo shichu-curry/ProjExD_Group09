@@ -15,14 +15,12 @@ Swarm Night
 今後追加機能を個人で実装するにあたって、取り組みやすくなるように、拡張ポイントには [拡張] コメントを付けている。
 """
 
-
 import os
 import math
 import random
 import sys
 
 import pygame
-
 
 # （画像・音声素材を相対パスで読み込めるようにするため）
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -61,7 +59,6 @@ COL_HP_FG  = (60, 200, 90)
 # 日本語フォントが見つかったかどうか（見つからなければ英語表記に切替）
 
 JP_FONT_PATH = None
-
 
 def _find_jp_font_path():
     """日本語フォントのファイルパスを探す。
@@ -105,7 +102,6 @@ def _find_jp_font_path():
                 return path
     return None
 
-
 def load_font(size):
     """日本語対応フォントを返す。見つからなければデフォルト
     （その場合、日本語文字列は英語表記に切り替えられる）。"""
@@ -116,11 +112,9 @@ def load_font(size):
         return pygame.font.Font(JP_FONT_PATH, size)
     return pygame.font.SysFont(None, size)
 
-
 def jp_available():
     """日本語フォントが使えるか。"""
     return bool(JP_FONT_PATH)
-
 
 def make_circle_surf(radius, color, border=None):
     """円形のSurfaceを作る（画像素材が無くても動くように）。
@@ -130,7 +124,6 @@ def make_circle_surf(radius, color, border=None):
     if border:
         pygame.draw.circle(surf, border, (radius, radius), radius, 2)
     return surf
-
 
 def load_image(path, size, fallback_color): #追加機能実装(杉本)
     """fig/ 内の武器画像(png)を読み込む。
@@ -183,7 +176,7 @@ class Player(pygame.sprite.Sprite):
             dx *= 0.7071
             dy *= 0.7071
         if dx or dy:
-            self.facing = (dx, dy)  # 移動中だけ向きを更新　追加機能実装(杉本)
+            self.facing = (dx, dy)  # 移動中だけ向きを更新 追加機能実装(杉本)
         self.rect.x += dx * self.speed
         self.rect.y += dy * self.speed
         self.rect.clamp_ip(pygame.Rect(0, 0, WIDTH, HEIGHT))
@@ -244,7 +237,6 @@ class Enemy(pygame.sprite.Sprite):
             return True
         return False
 
-
 def spawn_enemy(enemies, now_ms):
     """画面外のランダムな位置に敵を1体湧かせる。
     [拡張] 難易度上昇: now_ms（経過時間）に応じて湧き数・敵HP・速度を
@@ -294,6 +286,19 @@ class Bullet(pygame.sprite.Sprite):
         if not pygame.Rect(-50, -50, WIDTH + 100, HEIGHT + 100).colliderect(self.rect):
             self.kill()
 
+class MuzzleFlash(pygame.sprite.Sprite):
+    """マズルフラッシュ: 発射時に一瞬だけ表示される演出。"""
+    DURATION = 50   # 表示時間 (ms)
+
+    def __init__(self, pos, now, base_image):
+        super().__init__()
+        self.t0 = now
+        self.image = base_image
+        self.rect = self.image.get_rect(center=pos)
+
+    def update(self, now):
+        if now - self.t0 >= self.DURATION:
+            self.kill()
 
 class Weapon:
     """自動発射武器の基本形: クールダウンが切れたら最も近い敵を撃つ。
@@ -303,11 +308,13 @@ class Weapon:
            回転オービット・範囲爆発・レーザー等を独立クラスで追加できる。
            プレイヤーが複数武器を持てるよう、main側は weapons リストで管理している"""
 
-    def __init__(self):
+    def __init__(self, flash_image=None, fire_sound=None):  # 引数を追加
         self.interval = FIRE_INTERVAL
         self.last_fired = 0
+        self.flash_image = flash_image
+        self.fire_sound = fire_sound
 
-    def update(self, now, player, enemies, bullets, attacks): #attacksも追加　追加実装(杉本)
+    def update(self, now, player, enemies, bullets, attacks): #attacksも追加 追加実装(杉本)
         if now - self.last_fired < self.interval:
             return
         target = self._nearest_enemy(player, enemies)
@@ -316,6 +323,10 @@ class Weapon:
         bullets.add(Bullet(player.rect.center, target.rect.center))
         self.last_fired = now
         # [拡張] 発射SE、マズルフラッシュ等の演出はここ
+        if self.fire_sound:
+            self.fire_sound.play()
+        if self.flash_image:
+            attacks.add(MuzzleFlash(player.rect.center, now, self.flash_image))
 
     @staticmethod
     def _nearest_enemy(player, enemies):
@@ -535,19 +546,28 @@ def draw_gameover(screen, font_big, font, elapsed_ms, kills):
 # =========================================================
 
 def reset_game():
-    """ゲーム開始/リスタート時の初期化。状態一式を dict で返す。"""# 修正: 剣・槍・斧の武器画像(fig/内のpng)を読み込む処理を追加
+    """ゲーム開始/リスタート時の初期化。状態一式を dict で返す。"""
+    # 剣・槍・斧の武器画像
     img_sword = load_image("fig/sord01.png", (70, 70), (200, 200, 220))
     img_spear = load_image("fig/yari01.png", (100, 100), (180, 140, 90))
     img_axe = load_image("fig/ono.png", (55, 55), (150, 150, 160))
+    
+    # マズルフラッシュ画像と発射音の読み込み
+    img_flash = load_image("fig/light.png", (300, 300), (255, 255, 150))
+    snd_path ="sound/gun.mp3"
+    snd_gun = pygame.mixer.Sound(snd_path) if os.path.exists(snd_path) else None
+
     return {
         "player": Player((WIDTH // 2, HEIGHT // 2)),
         "enemies": pygame.sprite.Group(),
-        "bullets": pygame.sprite.Group(),# 修正: 剣・槍・斧などの近接攻撃スプライトを管理するグループを追加 追加実装(杉本)
-        "attacks": pygame.sprite.Group(), # 修正: 3武器(剣・槍・斧)をweaponsリストに登録　追加実装(杉本)
-        "weapons": [Weapon(),
-                    SwordWeapon(img_sword),
-                    SpearWeapon(img_spear),
-                    AxeWeapon(img_axe)],
+        "bullets": pygame.sprite.Group(),
+        "attacks": pygame.sprite.Group(), 
+        "weapons": [
+            Weapon(img_flash, snd_gun), 
+            SwordWeapon(img_sword), 
+            SpearWeapon(img_spear), 
+            AxeWeapon(img_axe)
+        ],
         "start_ms": pygame.time.get_ticks(),
         "last_spawn": 0,
         "kills": 0,
@@ -556,6 +576,7 @@ def reset_game():
 
 def main():
     pygame.init()
+    pygame.mixer.init()  # 音声再生用に追加
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption("生きのこれ！こうかとん")
     clock = pygame.time.Clock()
@@ -612,13 +633,19 @@ def main():
                 for enemy in hit_enemies:
                     if enemy.take_damage(bullet.damage):
                         game["kills"] += 1
-            for attack in game["attacks"]:# 修正: 近接攻撃(剣・槍・斧) × 敵 の当たり判定を追加hit_ids で「同じ敵には1回だけ当たる」貫通型にしている　追加実装(杉本)
+                        
+            # 近接攻撃(剣・槍・斧)・フラッシュ × 敵 の当たり判定を追加
+            for attack in game["attacks"]:
+                # マズルフラッシュには当たり判定を発生させない
+                if isinstance(attack, MuzzleFlash):
+                    continue
                 for enemy in pygame.sprite.spritecollide(attack, enemies, False):
                     if id(enemy) in attack.hit_ids:
                         continue
                     attack.hit_ids.add(id(enemy))
                     if enemy.take_damage(attack.damage):
                         game["kills"] += 1
+                        
             # 敵 × プレイヤー
             touched = pygame.sprite.spritecollide(player, enemies, False)
             if touched:
@@ -631,15 +658,15 @@ def main():
         screen.fill(COL_BG)
         if state == "PLAY":
             game["bullets"].draw(screen)
-            game["attacks"].draw(screen)
             game["enemies"].draw(screen)
             game["player"].draw(screen, now)
+            game["attacks"].draw(screen)  # プレイヤーの「上」に描画されるよう順番を後へ移動
             draw_hud(screen, font, game["player"],
                      now - game["start_ms"], game["kills"])
         else:  # GAMEOVER
             game["bullets"].draw(screen)
-            game["attacks"].draw(screen)
             game["enemies"].draw(screen)
+            game["attacks"].draw(screen)
             draw_hud(screen, font, game["player"], final_time, game["kills"])
             draw_gameover(screen, font_big, font, final_time, game["kills"])
 
